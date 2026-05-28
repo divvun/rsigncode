@@ -3,7 +3,7 @@ name = "rsigncode-cli"
 version = "0.1.0"
 edition = "2021"
 description = "Microsoft Authenticode signing tool (Rust port)"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [[bin]]
 name = "rsigncode"

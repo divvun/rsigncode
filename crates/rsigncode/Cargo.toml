@@ -3,7 +3,7 @@ name = "rsigncode"
 version = "0.1.0"
 edition = "2021"
 description = "Microsoft Authenticode signing and verification"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 # CMS / PKCS#7 signing (apple-codesign's battle-tested crate)
