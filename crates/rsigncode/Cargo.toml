@@ -1,0 +1,34 @@
+[package]
+name = "rsigncode"
+version = "0.1.0"
+edition = "2021"
+description = "Microsoft Authenticode signing and verification"
+license = "MIT"
+
+[dependencies]
+# CMS / PKCS#7 signing (apple-codesign's battle-tested crate)
+cryptographic-message-syntax = "0.26"
+# x509-certificate is a transitive dep of CMS crate; we use it directly for cert/key types
+x509-certificate = "0.23"
+bcder = "0.7"
+bytes = "1"
+
+# ASN.1 and cryptographic formats (for custom Authenticode types)
+der = { version = "0.7", features = ["derive", "alloc", "oid"] }
+x509-cert = "0.2"
+const-oid = { version = "0.9", features = ["db"] }
+
+# Cryptographic primitives
+sha1 = "0.10"
+sha2 = "0.10"
+digest = "0.10"
+
+# Utilities
+thiserror = "2"
+pem = "3"
+base64 = "0.22"
+chrono = "0.4"
+hex = "0.4"
+reqwest = { version = "0.12", features = ["blocking"] }
+
+[dev-dependencies]
