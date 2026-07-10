@@ -1,6 +1,6 @@
 use const_oid::ObjectIdentifier;
 use der::asn1::{BitString, Ia5String, OctetString};
-use der::{Any, Sequence, Choice};
+use der::{Any, Choice, Sequence};
 use x509_cert::spki::AlgorithmIdentifierOwned;
 
 /// SpcIndirectDataContent — the signed content in an Authenticode signature.
@@ -65,9 +65,9 @@ pub struct SpcPeImageData {
 pub enum SpcLink {
     #[asn1(context_specific = "0", tag_mode = "IMPLICIT")]
     Url(Ia5String),
-    #[asn1(context_specific = "1", tag_mode = "IMPLICIT")]
+    #[asn1(context_specific = "1", tag_mode = "IMPLICIT", constructed = "true")]
     Moniker(SpcSerializedObject),
-    #[asn1(context_specific = "2", tag_mode = "EXPLICIT")]
+    #[asn1(context_specific = "2", tag_mode = "EXPLICIT", constructed = "true")]
     File(SpcString),
 }
 
@@ -135,6 +135,20 @@ pub struct SpcSipInfo {
 
 /// Page hash class ID used to identify SpcSerializedObject containing page hashes.
 pub const PAGE_HASH_CLASS_ID: [u8; 16] = [
-    0xa6, 0xb5, 0x86, 0xd5, 0xb4, 0xa1, 0x24, 0x66,
-    0xae, 0x05, 0xa2, 0x17, 0xda, 0x8e, 0x60, 0xd6,
+    0xa6, 0xb5, 0x86, 0xd5, 0xb4, 0xa1, 0x24, 0x66, 0xae, 0x05, 0xa2, 0x17, 0xda, 0x8e, 0x60, 0xd6,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use der::Encode;
+
+    #[test]
+    fn file_link_uses_constructed_explicit_tag() {
+        let link = SpcLink::File(SpcString::Unicode(
+            der::asn1::BmpString::from_utf8("").unwrap(),
+        ));
+
+        assert_eq!(link.to_der().unwrap(), [0xa2, 0x02, 0x80, 0x00]);
+    }
+}

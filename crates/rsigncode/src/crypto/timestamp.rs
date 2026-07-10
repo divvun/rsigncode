@@ -21,10 +21,7 @@ fn oid_to_bcder(oid: &const_oid::ObjectIdentifier) -> Oid {
 ///
 /// `signature_bytes` is the raw signature (encrypted digest) from the SignerInfo.
 /// Returns the low-level `rfc5652::SignedData` of the timestamp token.
-fn request_rfc3161(
-    signature_bytes: &[u8],
-    url: &str,
-) -> Result<Rfc5652SignedData> {
+fn request_rfc3161(signature_bytes: &[u8], url: &str) -> Result<Rfc5652SignedData> {
     let response = cryptographic_message_syntax::time_stamp_message_http(
         url,
         signature_bytes,
@@ -67,10 +64,7 @@ fn request_rfc3161_with_fallback(
 ///
 /// `signature_bytes` is the raw signature (encrypted digest) from the SignerInfo.
 /// Returns the low-level `rfc5652::SignedData` from the TSA's PKCS#7 response.
-fn request_authenticode(
-    signature_bytes: &[u8],
-    url: &str,
-) -> Result<Rfc5652SignedData> {
+fn request_authenticode(signature_bytes: &[u8], url: &str) -> Result<Rfc5652SignedData> {
     use base64::Engine;
 
     // Build the Authenticode TimeStampRequest structure
@@ -125,8 +119,11 @@ fn request_authenticode(
         response_bytes.to_vec()
     };
 
-    Rfc5652SignedData::decode_ber(&pkcs7_der)
-        .map_err(|e| Error::Timestamp(format!("failed to parse Authenticode timestamp PKCS#7: {e}")))
+    Rfc5652SignedData::decode_ber(&pkcs7_der).map_err(|e| {
+        Error::Timestamp(format!(
+            "failed to parse Authenticode timestamp PKCS#7: {e}"
+        ))
+    })
 }
 
 /// Send an Authenticode timestamp request, trying each URL in order until one succeeds.
@@ -192,10 +189,7 @@ fn attach_authenticode_timestamp(
 }
 
 /// Push an attribute onto the first signer's unsigned attributes.
-fn push_unsigned_attribute(
-    signed_data: &mut Rfc5652SignedData,
-    attr: Attribute,
-) -> Result<()> {
+fn push_unsigned_attribute(signed_data: &mut Rfc5652SignedData, attr: Attribute) -> Result<()> {
     let signer_info = signed_data
         .signer_infos
         .first_mut()
@@ -240,8 +234,13 @@ pub fn add_timestamps(
         return Ok(pkcs7_der.to_vec());
     }
 
-    // Parse at the low level so we can mutate
-    let mut signed_data = Rfc5652SignedData::decode_ber(pkcs7_der)
+    // A PE contains native Authenticode content without RFC 5652's OCTET STRING
+    // wrapper. Restore it temporarily for the generic CMS parser.
+    let cms_der = super::signing::wrap_authenticode_content(pkcs7_der)
+        .map_err(|e| Error::Timestamp(format!("failed to normalize PKCS#7: {e}")))?;
+
+    // Parse at the low level so we can mutate.
+    let mut signed_data = Rfc5652SignedData::decode_ber(&cms_der)
         .map_err(|e| Error::Timestamp(format!("failed to parse PKCS#7 for timestamping: {e}")))?;
 
     // Get the signature bytes from the first signer
@@ -261,11 +260,12 @@ pub fn add_timestamps(
 
     // Add Authenticode timestamps
     if !authenticode_urls.is_empty() {
-        let tsa_response =
-            request_authenticode_with_fallback(&signature_bytes, authenticode_urls)?;
+        let tsa_response = request_authenticode_with_fallback(&signature_bytes, authenticode_urls)?;
         attach_authenticode_timestamp(&mut signed_data, &tsa_response)?;
     }
 
-    // Re-encode as ContentInfo
-    encode_signed_data_as_content_info(&signed_data)
+    // Re-encode as ContentInfo, then restore native Authenticode content for
+    // embedding in the PE certificate table.
+    let encoded = encode_signed_data_as_content_info(&signed_data)?;
+    super::signing::normalize_authenticode_signature(&encoded)
 }

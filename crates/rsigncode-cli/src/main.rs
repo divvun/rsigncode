@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
-use cryptographic_message_syntax;
 use rsigncode::crypto::certs::KeyMaterial;
 use rsigncode::crypto::chain;
 use rsigncode::crypto::signing::{self, HashAlgorithm, SigningOptions};
@@ -13,7 +12,10 @@ use rsigncode::crypto::verify::{self, VerifyOptions};
 use rsigncode::format::pe;
 
 #[derive(Parser)]
-#[command(name = "rsigncode", about = "Microsoft Authenticode signing tool (Rust)")]
+#[command(
+    name = "rsigncode",
+    about = "Microsoft Authenticode signing tool (Rust)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -193,24 +195,22 @@ fn main() -> Result<()> {
 }
 
 fn cmd_sign(args: SignArgs) -> Result<()> {
-    let hash_algo = HashAlgorithm::from_name(&args.h)
-        .context("invalid hash algorithm")?;
+    let hash_algo = HashAlgorithm::from_name(&args.h).context("invalid hash algorithm")?;
 
     let certfile = args.certs.context("--certs required")?;
     let keyfile = args.key.context("--key required")?;
 
-    let mut km = KeyMaterial::from_pem(&certfile, &keyfile)
-        .context("failed to load certificates/key")?;
+    let mut km =
+        KeyMaterial::from_pem(&certfile, &keyfile).context("failed to load certificates/key")?;
 
     if let Some(ac) = &args.ac {
         km.add_extra_certs_pem(ac)
             .context("failed to load extra certificates")?;
     }
 
-    let mut input = File::open(&args.infile)
-        .with_context(|| format!("failed to open: {:?}", args.infile))?;
-    let pe_info = pe::parse_pe(&mut input)
-        .context("failed to parse PE file")?;
+    let mut input =
+        File::open(&args.infile).with_context(|| format!("failed to open: {:?}", args.infile))?;
+    let pe_info = pe::parse_pe(&mut input).context("failed to parse PE file")?;
 
     let digest = signing::pe_digest(&mut input, &pe_info, hash_algo)
         .context("failed to calculate digest")?;
@@ -240,8 +240,8 @@ fn cmd_sign(args: SignArgs) -> Result<()> {
 }
 
 fn cmd_verify(args: VerifyArgs) -> Result<()> {
-    let mut input = File::open(&args.infile)
-        .with_context(|| format!("failed to open: {:?}", args.infile))?;
+    let mut input =
+        File::open(&args.infile).with_context(|| format!("failed to open: {:?}", args.infile))?;
 
     let mut opts = VerifyOptions {
         ignore_timestamp: args.ignore_timestamp,
@@ -254,16 +254,13 @@ fn cmd_verify(args: VerifyArgs) -> Result<()> {
     };
 
     if let Some(ref path) = args.cafile {
-        opts.ca_certs = chain::load_pem_certs(path)
-            .context("failed to load --CAfile")?;
+        opts.ca_certs = chain::load_pem_certs(path).context("failed to load --CAfile")?;
     }
     if let Some(ref path) = args.tsa_cafile {
-        opts.tsa_ca_certs = chain::load_pem_certs(path)
-            .context("failed to load --TSA-CAfile")?;
+        opts.tsa_ca_certs = chain::load_pem_certs(path).context("failed to load --TSA-CAfile")?;
     }
 
-    let result = verify::verify_pe_rich(&mut input, &opts)
-        .context("Verification failed")?;
+    let result = verify::verify_pe_rich(&mut input, &opts).context("Verification failed")?;
 
     verify::print_verify_result(&result);
 
@@ -276,13 +273,11 @@ fn cmd_verify(args: VerifyArgs) -> Result<()> {
 }
 
 fn cmd_extract_data(args: ExtractDataArgs) -> Result<()> {
-    let hash_algo = HashAlgorithm::from_name(&args.h)
-        .context("invalid hash algorithm")?;
+    let hash_algo = HashAlgorithm::from_name(&args.h).context("invalid hash algorithm")?;
 
-    let mut input = File::open(&args.infile)
-        .with_context(|| format!("failed to open: {:?}", args.infile))?;
-    let pe_info = pe::parse_pe(&mut input)
-        .context("failed to parse PE file")?;
+    let mut input =
+        File::open(&args.infile).with_context(|| format!("failed to open: {:?}", args.infile))?;
+    let pe_info = pe::parse_pe(&mut input).context("failed to parse PE file")?;
 
     let digest = signing::pe_digest(&mut input, &pe_info, hash_algo)
         .context("failed to calculate digest")?;
@@ -312,10 +307,9 @@ fn cmd_extract_data(args: ExtractDataArgs) -> Result<()> {
 }
 
 fn cmd_extract_signature(args: ExtractSignatureArgs) -> Result<()> {
-    let mut input = File::open(&args.infile)
-        .with_context(|| format!("failed to open: {:?}", args.infile))?;
-    let pe_info = pe::parse_pe(&mut input)
-        .context("failed to parse PE file")?;
+    let mut input =
+        File::open(&args.infile).with_context(|| format!("failed to open: {:?}", args.infile))?;
+    let pe_info = pe::parse_pe(&mut input).context("failed to parse PE file")?;
 
     let sig = pe::extract_signature(&mut input, &pe_info)?
         .ok_or_else(|| anyhow::anyhow!("no signature found"))?;
@@ -329,7 +323,10 @@ fn cmd_extract_signature(args: ExtractSignatureArgs) -> Result<()> {
             .with_context(|| format!("failed to write: {:?}", args.outfile))?;
     }
 
-    eprintln!("Extracted signature: {:?} -> {:?}", args.infile, args.outfile);
+    eprintln!(
+        "Extracted signature: {:?} -> {:?}",
+        args.infile, args.outfile
+    );
     Ok(())
 }
 
@@ -344,14 +341,15 @@ fn cmd_attach_signature(args: AttachSignatureArgs) -> Result<()> {
         sig_data
     };
 
-    // Validate the blob is actually parseable PKCS#7
-    cryptographic_message_syntax::SignedData::parse_ber(&pkcs7_der)
+    // Remote CMS signers return RFC 5652 content with an OCTET STRING wrapper.
+    // Strip it before embedding the signature in a PE, as required by the
+    // Windows Authenticode SIP.
+    let pkcs7_der = signing::normalize_authenticode_signature(&pkcs7_der)
         .context("--sigin file is not a valid PKCS#7 SignedData")?;
 
-    let mut input = File::open(&args.infile)
-        .with_context(|| format!("failed to open: {:?}", args.infile))?;
-    let pe_info = pe::parse_pe(&mut input)
-        .context("failed to parse PE file")?;
+    let mut input =
+        File::open(&args.infile).with_context(|| format!("failed to open: {:?}", args.infile))?;
+    let pe_info = pe::parse_pe(&mut input).context("failed to parse PE file")?;
 
     pe::write_signed_pe(&mut input, &args.outfile, &pe_info, &pkcs7_der)
         .context("failed to write signed PE")?;
@@ -364,10 +362,9 @@ fn cmd_attach_signature(args: AttachSignatureArgs) -> Result<()> {
 }
 
 fn cmd_remove_signature(args: RemoveSignatureArgs) -> Result<()> {
-    let mut input = File::open(&args.infile)
-        .with_context(|| format!("failed to open: {:?}", args.infile))?;
-    let pe_info = pe::parse_pe(&mut input)
-        .context("failed to parse PE file")?;
+    let mut input =
+        File::open(&args.infile).with_context(|| format!("failed to open: {:?}", args.infile))?;
+    let pe_info = pe::parse_pe(&mut input).context("failed to parse PE file")?;
 
     pe::write_unsigned_pe(&mut input, &args.outfile, &pe_info)
         .context("failed to remove signature")?;
@@ -381,10 +378,9 @@ fn cmd_add(args: AddArgs) -> Result<()> {
         bail!("at least one -t or --ts URL is required");
     }
 
-    let mut input = File::open(&args.infile)
-        .with_context(|| format!("failed to open: {:?}", args.infile))?;
-    let pe_info = pe::parse_pe(&mut input)
-        .context("failed to parse PE file")?;
+    let mut input =
+        File::open(&args.infile).with_context(|| format!("failed to open: {:?}", args.infile))?;
+    let pe_info = pe::parse_pe(&mut input).context("failed to parse PE file")?;
 
     let pkcs7_der = pe::extract_signature(&mut input, &pe_info)?
         .ok_or_else(|| anyhow::anyhow!("no signature found — file must be signed first"))?;

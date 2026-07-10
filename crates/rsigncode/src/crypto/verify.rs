@@ -9,7 +9,7 @@ use sha2::Digest;
 use x509_certificate::CapturedX509Certificate;
 
 use crate::asn1::spc::{SpcIndirectDataContent, SpcSpOpusInfo, SpcString};
-use crate::crypto::chain;
+use crate::crypto::{chain, signing};
 use crate::error::{Error, Result};
 use crate::format::pe;
 use crate::oid;
@@ -121,11 +121,14 @@ pub fn verify_pe_rich(input: &mut File, opts: &VerifyOptions) -> Result<VerifyRe
     let mut signatures = Vec::new();
 
     for (index, blob) in sig_blobs.iter().enumerate() {
-        let signed_data = SignedData::parse_ber(blob)
+        let cms_blob = signing::wrap_authenticode_content(blob).map_err(|e| {
+            Error::Verification(format!("failed to normalize Authenticode content: {e}"))
+        })?;
+        let signed_data = SignedData::parse_ber(&cms_blob)
             .map_err(|e| Error::Verification(format!("failed to parse SignedData: {e}")))?;
 
         // ── Extract info ──
-        let mut sig_result = extract_signature_info(&signed_data, blob, index);
+        let mut sig_result = extract_signature_info(&signed_data, &cms_blob, index);
 
         // ── Verify digest ──
         sig_result.digest_ok = verify_digest(input, &pe_info, &signed_data).unwrap_or(false);
@@ -140,7 +143,7 @@ pub fn verify_pe_rich(input: &mut File, opts: &VerifyOptions) -> Result<VerifyRe
 
         // ── Verify timestamp ──
         if !opts.ignore_timestamp {
-            sig_result.timestamp_ok = verify_timestamp(blob);
+            sig_result.timestamp_ok = verify_timestamp(&cms_blob);
         }
 
         // ── Verify leaf hash ──
@@ -221,10 +224,7 @@ pub fn print_verify_result(result: &VerifyResult) {
 
         // Leaf hash
         if let Some(ok) = sig.leaf_hash_ok {
-            println!(
-                "\nLeaf hash match: {}",
-                if ok { "ok" } else { "failed" }
-            );
+            println!("\nLeaf hash match: {}", if ok { "ok" } else { "failed" });
         }
 
         // Timestamp verification
@@ -258,10 +258,7 @@ pub fn print_verify_result(result: &VerifyResult) {
         );
     }
 
-    println!(
-        "Number of verified signatures: {}",
-        result.signatures.len()
-    );
+    println!("Number of verified signatures: {}", result.signatures.len());
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────
@@ -271,7 +268,10 @@ fn collect_signature_blobs(pkcs7_der: &[u8]) -> Result<Vec<Vec<u8>>> {
     let mut blobs = vec![pkcs7_der.to_vec()];
 
     // Parse at low level to find nested signatures in unsigned attributes
-    let low_level = Rfc5652SignedData::decode_ber(pkcs7_der)
+    let cms_der = signing::wrap_authenticode_content(pkcs7_der).map_err(|e| {
+        Error::Verification(format!("failed to normalize Authenticode content: {e}"))
+    })?;
+    let low_level = Rfc5652SignedData::decode_ber(&cms_der)
         .map_err(|e| Error::Verification(format!("failed to parse SignedData: {e}")))?;
 
     let nested_oid = Oid(Bytes::copy_from_slice(oid::SPC_NESTED_SIGNATURE.as_bytes()));
@@ -387,8 +387,9 @@ fn extract_timestamp_info(raw_der: &[u8], high_level: &SignedData) -> Option<Tim
     let low_level = Rfc5652SignedData::decode_ber(raw_der).ok()?;
 
     let spc_rfc3161_oid = Oid(Bytes::copy_from_slice(oid::SPC_RFC3161.as_bytes()));
-    let counter_sig_oid =
-        Oid(Bytes::copy_from_slice(oid::PKCS9_COUNTER_SIGNATURE.as_bytes()));
+    let counter_sig_oid = Oid(Bytes::copy_from_slice(
+        oid::PKCS9_COUNTER_SIGNATURE.as_bytes(),
+    ));
 
     for signer_info in low_level.signer_infos.iter() {
         if let Some(ref attrs) = signer_info.unsigned_attributes {
@@ -454,11 +455,7 @@ fn extract_timestamp_from_signed_data(
 }
 
 /// Verify the Authenticode digest matches the file.
-fn verify_digest(
-    input: &mut File,
-    pe_info: &pe::PeInfo,
-    signed_data: &SignedData,
-) -> Result<bool> {
+fn verify_digest(input: &mut File, pe_info: &pe::PeInfo, signed_data: &SignedData) -> Result<bool> {
     let encap_content = signed_data
         .signed_content()
         .ok_or_else(|| Error::Verification("no encapsulated content in signature".into()))?;
@@ -476,8 +473,21 @@ fn verify_digest(
 
 /// Verify the cryptographic signature.
 fn verify_crypto_signature(signed_data: &SignedData) -> bool {
+    let Some(content) = signed_data.signed_content() else {
+        return false;
+    };
+    let Ok(content_value) = signing::der_sequence_content(content) else {
+        return false;
+    };
+
     let mut ok = false;
     for signer in signed_data.signers() {
+        if signer
+            .verify_message_digest_with_content(content_value)
+            .is_err()
+        {
+            return false;
+        }
         if signer
             .verify_signature_with_signed_data(signed_data)
             .is_err()

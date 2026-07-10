@@ -97,20 +97,14 @@ fn sign_and_verify_pe_roundtrip() {
         rfc3161_urls: Vec::new(),
         authenticode_urls: Vec::new(),
     };
-    let pkcs7_der = signing::create_authenticode_signature(
-        &key,
-        cert.clone(),
-        vec![],
-        &digest,
-        &opts,
-    )
-    .unwrap();
+    let pkcs7_der =
+        signing::create_authenticode_signature(&key, cert.clone(), vec![], &digest, &opts).unwrap();
 
     assert!(!pkcs7_der.is_empty(), "PKCS#7 should not be empty");
 
     // Write signed PE to temp file in target dir (avoid Windows Defender locks)
-    let signed_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/test_signed.bin");
+    let signed_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test_signed.bin");
     pe::write_signed_pe(&mut input, &signed_path, &pe_info, &pkcs7_der)
         .unwrap_or_else(|e| panic!("write_signed_pe failed: {e}"));
 
@@ -125,8 +119,7 @@ fn sign_and_verify_pe_roundtrip() {
     assert!(extracted.is_some(), "should be able to extract signature");
 
     // Verify digest of signed file matches original unsigned digest
-    let verify_digest =
-        signing::pe_digest(&mut signed, &signed_pe, HashAlgorithm::Sha256).unwrap();
+    let verify_digest = signing::pe_digest(&mut signed, &signed_pe, HashAlgorithm::Sha256).unwrap();
     assert_eq!(
         digest, verify_digest,
         "digest should match between unsigned and signed file"
@@ -192,18 +185,12 @@ fn extract_data_attach_signature_roundtrip() {
     );
 
     // Step 2: "remote sign" — in reality we sign locally with the full signing function
-    let signed_pkcs7 = signing::create_authenticode_signature(
-        &key,
-        cert.clone(),
-        vec![],
-        &digest,
-        &opts,
-    )
-    .unwrap();
+    let signed_pkcs7 =
+        signing::create_authenticode_signature(&key, cert.clone(), vec![], &digest, &opts).unwrap();
 
     // Step 3: attach-signature — embed the signed PKCS#7 into the PE
-    let attached_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/test_attached.bin");
+    let attached_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test_attached.bin");
     pe::write_signed_pe(&mut input, &attached_path, &pe_info, &signed_pkcs7)
         .expect("attach-signature should succeed");
 
@@ -277,6 +264,8 @@ fn sign_necessary_nu_remote() {
         .expect("response should be valid PKCS#7 SignedData");
 
     // Step 3: attach-signature
+    let signed_pkcs7 = signing::normalize_authenticode_signature(&signed_pkcs7)
+        .expect("response should be convertible to Authenticode PKCS#7");
     let signed_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/test_necessary_signed.bin");
     pe::write_signed_pe(&mut input, &signed_path, &pe_info, &signed_pkcs7)
@@ -315,17 +304,11 @@ fn verify_rich_roundtrip() {
         rfc3161_urls: Vec::new(),
         authenticode_urls: Vec::new(),
     };
-    let pkcs7_der = signing::create_authenticode_signature(
-        &key,
-        cert.clone(),
-        vec![],
-        &digest,
-        &opts,
-    )
-    .unwrap();
+    let pkcs7_der =
+        signing::create_authenticode_signature(&key, cert.clone(), vec![], &digest, &opts).unwrap();
 
-    let signed_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/test_rich_verify.bin");
+    let signed_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test_rich_verify.bin");
     pe::write_signed_pe(&mut input, &signed_path, &pe_info, &pkcs7_der).unwrap();
 
     let mut signed = File::open(&signed_path).unwrap();
@@ -369,17 +352,11 @@ fn verify_with_self_signed_ca() {
         rfc3161_urls: Vec::new(),
         authenticode_urls: Vec::new(),
     };
-    let pkcs7_der = signing::create_authenticode_signature(
-        &key,
-        cert.clone(),
-        vec![],
-        &digest,
-        &opts,
-    )
-    .unwrap();
+    let pkcs7_der =
+        signing::create_authenticode_signature(&key, cert.clone(), vec![], &digest, &opts).unwrap();
 
-    let signed_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/test_ca_verify.bin");
+    let signed_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test_ca_verify.bin");
     pe::write_signed_pe(&mut input, &signed_path, &pe_info, &pkcs7_der).unwrap();
 
     // Verify with the self-signed cert as CA — should pass chain verification

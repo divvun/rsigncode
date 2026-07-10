@@ -82,9 +82,7 @@ pub fn parse_pe(f: &mut File) -> Result<PeInfo> {
     let pe32plus_offset = if pe32plus { 16u64 } else { 0 };
 
     // NumberOfRvaAndSizes
-    f.seek(SeekFrom::Start(
-        header_size as u64 + 116 + pe32plus_offset,
-    ))?;
+    f.seek(SeekFrom::Start(header_size as u64 + 116 + pe32plus_offset))?;
     let nrvas = read_u32(f)?;
     if nrvas < 5 {
         return Err(Error::InvalidPe(
@@ -100,10 +98,7 @@ pub fn parse_pe(f: &mut File) -> Result<PeInfo> {
 
     // Signature must be at end of file (MS12-024)
     if (sigpos != 0 || siglen != 0)
-        && (sigpos == 0
-            || siglen == 0
-            || sigpos >= filesize
-            || sigpos + siglen != filesize)
+        && (sigpos == 0 || siglen == 0 || sigpos >= filesize || sigpos + siglen != filesize)
     {
         // Ignore non-trailing signature
         sigpos = 0;
@@ -224,11 +219,7 @@ pub fn write_signed_pe_to(
     pkcs7_der: &[u8],
 ) -> Result<()> {
     // Step 1: Copy file data (excluding any existing signature)
-    let data_end = if pe.sigpos > 0 {
-        pe.sigpos
-    } else {
-        pe.fileend
-    };
+    let data_end = if pe.sigpos > 0 { pe.sigpos } else { pe.fileend };
     copy_range(input, output, 0, data_end as u64)?;
 
     // Step 2: Zero the checksum field
@@ -335,9 +326,7 @@ pub fn pe_calc_checksum(f: &mut File, checksum_offset: u64) -> Result<u32> {
         // Process pairs of bytes
         let pairs = n - (n % 2);
         for i in (0..pairs).step_by(2) {
-            let val = if offset == checksum_offset as u32
-                || offset == checksum_offset as u32 + 2
-            {
+            let val = if offset == checksum_offset as u32 || offset == checksum_offset as u32 + 2 {
                 0u16 // skip checksum field itself
             } else {
                 u16::from_le_bytes([buf[i], buf[i + 1]])
@@ -354,12 +343,7 @@ pub fn pe_calc_checksum(f: &mut File, checksum_offset: u64) -> Result<u32> {
 
 // --- Internal helpers ---
 
-fn hash_range(
-    f: &mut File,
-    hasher: &mut impl digest::Update,
-    start: u64,
-    end: u64,
-) -> Result<()> {
+fn hash_range(f: &mut File, hasher: &mut impl digest::Update, start: u64, end: u64) -> Result<()> {
     if end <= start {
         return Ok(());
     }
@@ -416,8 +400,8 @@ mod tests {
 
     #[test]
     fn parse_unsigned_exe() {
-        let test_exe = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/files/unsigned.exe");
+        let test_exe =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/files/unsigned.exe");
         if !test_exe.exists() {
             eprintln!("skipping test: {test_exe:?} not found");
             return;
@@ -431,8 +415,8 @@ mod tests {
 
     #[test]
     fn checksum_unsigned_exe() {
-        let test_exe = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/files/unsigned.exe");
+        let test_exe =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/files/unsigned.exe");
         if !test_exe.exists() {
             eprintln!("skipping test: {test_exe:?} not found");
             return;
@@ -448,8 +432,8 @@ mod tests {
     fn digest_unsigned_exe() {
         use sha2::Digest;
 
-        let test_exe = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/files/unsigned.exe");
+        let test_exe =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/files/unsigned.exe");
         if !test_exe.exists() {
             eprintln!("skipping test: {test_exe:?} not found");
             return;

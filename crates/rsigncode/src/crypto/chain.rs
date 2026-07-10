@@ -9,13 +9,12 @@ pub fn load_pem_certs(path: &Path) -> Result<Vec<CapturedX509Certificate>> {
     let data = std::fs::read(path)
         .map_err(|e| Error::Certificate(format!("failed to read {}: {e}", path.display())))?;
 
-    let certs = CapturedX509Certificate::from_pem_multiple(&data)
-        .map_err(|e| {
-            Error::Certificate(format!(
-                "failed to parse PEM certs from {}: {e}",
-                path.display()
-            ))
-        })?;
+    let certs = CapturedX509Certificate::from_pem_multiple(&data).map_err(|e| {
+        Error::Certificate(format!(
+            "failed to parse PEM certs from {}: {e}",
+            path.display()
+        ))
+    })?;
 
     if certs.is_empty() {
         return Err(Error::Certificate(format!(
@@ -34,9 +33,9 @@ pub fn find_signer_cert<'a>(
 ) -> Option<&'a CapturedX509Certificate> {
     let (issuer, serial) = signer.certificate_issuer_and_serial()?;
 
-    signed_data.certificates().find(|cert| {
-        *cert.serial_number_asn1() == *serial && *cert.issuer_name() == *issuer
-    })
+    signed_data
+        .certificates()
+        .find(|cert| *cert.serial_number_asn1() == *serial && *cert.issuer_name() == *issuer)
 }
 
 /// Verify a certificate chain from the signer cert to a trusted CA.
@@ -48,8 +47,7 @@ pub fn verify_chain_to_ca(
     cert_bag: &[CapturedX509Certificate],
     ca_certs: &[CapturedX509Certificate],
 ) -> bool {
-    let all_certs: Vec<&CapturedX509Certificate> =
-        cert_bag.iter().chain(ca_certs.iter()).collect();
+    let all_certs: Vec<&CapturedX509Certificate> = cert_bag.iter().chain(ca_certs.iter()).collect();
 
     let mut current = signer_cert;
     let mut visited = std::collections::HashSet::new();
@@ -90,8 +88,7 @@ pub fn verify_chain_to_ca(
 
 fn is_cert_in_set(cert: &CapturedX509Certificate, set: &[CapturedX509Certificate]) -> bool {
     let cert_data = cert.constructed_data();
-    set.iter()
-        .any(|c| c.constructed_data() == cert_data)
+    set.iter().any(|c| c.constructed_data() == cert_data)
 }
 
 fn find_issuer<'a>(
