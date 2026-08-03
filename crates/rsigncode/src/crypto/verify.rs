@@ -54,7 +54,7 @@ pub struct SignatureResult {
     pub index: usize,
     pub digest_algorithm: String,
     pub message_digest: Vec<u8>,
-    pub signing_time: Option<chrono::DateTime<chrono::Utc>>,
+    pub signing_time: Option<jiff::Timestamp>,
     pub program_name: Option<String>,
     pub program_url: Option<String>,
     pub signer_subject: Option<String>,
@@ -72,7 +72,7 @@ pub struct SignatureResult {
 
 pub struct TimestampInfo {
     pub timestamp_type: TimestampType,
-    pub time: Option<chrono::DateTime<chrono::Utc>>,
+    pub time: Option<jiff::Timestamp>,
     pub issuer: Option<String>,
     pub serial: Option<String>,
     pub hash_algorithm: Option<String>,
@@ -173,7 +173,7 @@ pub fn print_verify_result(result: &VerifyResult) {
         println!("\nAuthenticated attributes:");
         println!("\tMessage digest: {}", hex::encode(&sig.message_digest));
         if let Some(ref t) = sig.signing_time {
-            println!("\tSigning time: {}", t.format("%b %e %H:%M:%S %Y UTC"));
+            println!("\tSigning time: {}", t.strftime("%b %e %H:%M:%S %Y UTC"));
         }
         if let Some(ref name) = sig.program_name {
             println!("\tText description: {name}");
@@ -186,7 +186,7 @@ pub fn print_verify_result(result: &VerifyResult) {
         if let Some(ref ts) = sig.timestamp_info {
             println!("\nCountersignatures:");
             if let Some(ref t) = ts.time {
-                println!("\tTimestamp time: {}", t.format("%b %e %H:%M:%S %Y UTC"));
+                println!("\tTimestamp time: {}", t.strftime("%b %e %H:%M:%S %Y UTC"));
             }
             if let Some(ref algo) = ts.hash_algorithm {
                 println!("\tHash Algorithm: {algo}");

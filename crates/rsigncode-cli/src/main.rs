@@ -221,6 +221,7 @@ fn cmd_sign(args: SignArgs) -> Result<()> {
         program_url: args.i.as_deref(),
         rfc3161_urls: args.ts.clone(),
         authenticode_urls: args.t.clone(),
+        ..Default::default()
     };
 
     let pkcs7_der = signing::create_authenticode_signature(
@@ -284,10 +285,7 @@ fn cmd_extract_data(args: ExtractDataArgs) -> Result<()> {
 
     let opts = SigningOptions {
         hash_algo,
-        program_name: None,
-        program_url: None,
-        rfc3161_urls: Vec::new(),
-        authenticode_urls: Vec::new(),
+        ..Default::default()
     };
 
     let pkcs7_der = signing::build_extract_data_pkcs7(&digest, &opts)

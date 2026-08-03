@@ -96,6 +96,7 @@ fn sign_and_verify_pe_roundtrip() {
         program_url: Some("https://example.com"),
         rfc3161_urls: Vec::new(),
         authenticode_urls: Vec::new(),
+        ..Default::default()
     };
     let pkcs7_der =
         signing::create_authenticode_signature(&key, cert.clone(), vec![], &digest, &opts).unwrap();
@@ -173,6 +174,7 @@ fn extract_data_attach_signature_roundtrip() {
         program_url: None,
         rfc3161_urls: Vec::new(),
         authenticode_urls: Vec::new(),
+        ..Default::default()
     };
     let extract_data_pkcs7 = signing::build_extract_data_pkcs7(&digest, &opts).unwrap();
 
@@ -238,6 +240,7 @@ fn sign_necessary_nu_remote() {
         program_url: None,
         rfc3161_urls: Vec::new(),
         authenticode_urls: Vec::new(),
+        ..Default::default()
     };
     let extract_data = signing::build_extract_data_pkcs7(&digest, &opts).unwrap();
 
@@ -303,6 +306,7 @@ fn verify_rich_roundtrip() {
         program_url: Some("https://test.example.com"),
         rfc3161_urls: Vec::new(),
         authenticode_urls: Vec::new(),
+        ..Default::default()
     };
     let pkcs7_der =
         signing::create_authenticode_signature(&key, cert.clone(), vec![], &digest, &opts).unwrap();
@@ -351,6 +355,7 @@ fn verify_with_self_signed_ca() {
         program_url: None,
         rfc3161_urls: Vec::new(),
         authenticode_urls: Vec::new(),
+        ..Default::default()
     };
     let pkcs7_der =
         signing::create_authenticode_signature(&key, cert.clone(), vec![], &digest, &opts).unwrap();
@@ -371,4 +376,61 @@ fn verify_with_self_signed_ca() {
     assert_eq!(result.signatures[0].chain_ok, Some(true));
 
     std::fs::remove_file(&signed_path).ok();
+}
+
+/// The provenance scheme rests entirely on the extra attribute being *signed*.
+/// Assert it reaches the signature intact, and that tampering with it is detected.
+#[test]
+fn extra_signed_attributes_are_embedded_and_tamper_evident() {
+    let exe_path = test_exe_path();
+    if !exe_path.exists() {
+        eprintln!("skipping: {:?} not found", exe_path);
+        return;
+    }
+
+    // 2.25.42 in DER: 0x69 is the packed first two arcs (2*40 + 25), then 42.
+    let attr_oid = vec![0x69u8, 0x2a];
+    // A trivial SEQUENCE { INTEGER 1 } standing in for NcsSigningMetadata.
+    let value = vec![0x30u8, 0x03, 0x02, 0x01, 0x01];
+
+    let mut input = File::open(&exe_path).unwrap();
+    let pe_info = pe::parse_pe(&mut input).unwrap();
+    let digest = signing::pe_digest(&mut input, &pe_info, HashAlgorithm::Sha256).unwrap();
+
+    let opts = SigningOptions {
+        extra_signed_attributes: vec![(attr_oid.clone(), value.clone())],
+        ..Default::default()
+    };
+    let pkcs7 =
+        signing::create_authenticode_signature(&test_key(), test_cert(), vec![], &digest, &opts)
+            .unwrap();
+
+    // Attribute ::= SEQUENCE { type OBJECT IDENTIFIER, values SET OF ANY }
+    //
+    // Matching the whole structure also pins down that the value goes in as raw DER
+    // rather than wrapped in an OCTET STRING, which is what Authenticode requires.
+    let oid_tlv = [&[0x06u8, attr_oid.len() as u8][..], &attr_oid[..]].concat();
+    let set_tlv = [&[0x31u8, value.len() as u8][..], &value[..]].concat();
+    let inner = [&oid_tlv[..], &set_tlv[..]].concat();
+    let needle = [&[0x30u8, inner.len() as u8][..], &inner[..]].concat();
+    let at = pkcs7
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .expect("custom attribute not found as a well-formed Attribute in the signature");
+
+    // It must be *signed*, not merely present: flipping a byte of the value has to
+    // break verification. Same length, so no DER lengths shift.
+    let signed_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test_attr_tampered.bin");
+    let mut tampered = pkcs7.clone();
+    let value_at = at + needle.len() - value.len();
+    tampered[value_at + 4] ^= 0xff;
+    assert_ne!(tampered, pkcs7);
+
+    pe::write_signed_pe(&mut input, &signed_path, &pe_info, &tampered).unwrap();
+    let mut signed = File::open(&signed_path).unwrap();
+    assert!(
+        verify::verify_pe(&mut signed).is_err(),
+        "tampering with a signed attribute must invalidate the signature"
+    );
 }

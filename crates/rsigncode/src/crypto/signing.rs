@@ -3,7 +3,7 @@ use bytes::Bytes;
 use cryptographic_message_syntax::{SignedDataBuilder, SignerBuilder};
 use der::asn1::{BitString, OctetString};
 use der::{Decode, Encode};
-use x509_certificate::{rfc5652::AttributeValue, CapturedX509Certificate, InMemorySigningKeyPair};
+use x509_certificate::{rfc5652::AttributeValue, CapturedX509Certificate, KeyInfoSigner};
 
 use crate::asn1::spc::{
     DigestInfo, SpcAttributeTypeAndOptionalValue, SpcIndirectDataContent, SpcLink, SpcPeImageData,
@@ -49,6 +49,29 @@ pub struct SigningOptions<'a> {
     pub program_url: Option<&'a str>,
     pub rfc3161_urls: Vec<String>,
     pub authenticode_urls: Vec<String>,
+    /// Additional signed attributes as `(OID DER bytes, DER-encoded value)`.
+    ///
+    /// The OID is carried as pre-encoded DER rather than a `const_oid::ObjectIdentifier`
+    /// so that arcs wider than `u32` — notably the registration-free UUID arc `2.25.*` —
+    /// can be expressed. `const-oid` caps arcs at `u32::MAX` and explicitly does not
+    /// support UUID-based OIDs.
+    ///
+    /// Values are inserted into the attribute SET as raw DER, matching how the
+    /// Authenticode attributes below are emitted.
+    pub extra_signed_attributes: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl Default for SigningOptions<'_> {
+    fn default() -> Self {
+        Self {
+            hash_algo: HashAlgorithm::Sha256,
+            program_name: None,
+            program_url: None,
+            rfc3161_urls: Vec::new(),
+            authenticode_urls: Vec::new(),
+            extra_signed_attributes: Vec::new(),
+        }
+    }
 }
 
 /// Calculate the Authenticode digest of a PE file using the given algorithm.
@@ -86,22 +109,45 @@ pub fn pe_digest(
 ///
 /// The `digest` should be the Authenticode digest of the PE file (from `format::pe::authenticode_digest`).
 pub fn create_authenticode_signature(
-    signing_key: &InMemorySigningKeyPair,
+    signing_key: &dyn KeyInfoSigner,
     signer_cert: CapturedX509Certificate,
     extra_certs: Vec<CapturedX509Certificate>,
     digest: &[u8],
     opts: &SigningOptions,
 ) -> Result<Vec<u8>> {
-    // cryptographic-message-syntax 0.26 hardcodes SHA-256 as the signer digest algorithm.
-    // Using a different hash for the file digest would produce a mismatch that verifiers reject.
+    let spc_content = build_spc_indirect_data(digest, opts)?;
+    sign_spc_indirect_data(signing_key, signer_cert, extra_certs, &spc_content, opts)
+}
+
+/// Sign a caller-supplied, already-built `SpcIndirectDataContent`.
+///
+/// This is the remote-signer half of the `extract-data` → sign → `attach-signature`
+/// flow: the client builds the content (which commits to the PE digest) and a signing
+/// service turns it into a complete Authenticode PKCS#7.
+///
+/// `spc_content` is used **verbatim** as the encapsulated content, so the digest the
+/// client committed to is preserved byte-for-byte and its `attach-signature` check
+/// still matches.
+pub fn sign_spc_indirect_data(
+    signing_key: &dyn KeyInfoSigner,
+    signer_cert: CapturedX509Certificate,
+    extra_certs: Vec<CapturedX509Certificate>,
+    spc_content: &[u8],
+    opts: &SigningOptions,
+) -> Result<Vec<u8>> {
+    // Our CMS fork can now set the signer digest algorithm (`SignerBuilder::
+    // digest_algorithm`), so this is no longer a crate limitation — but nothing
+    // here has been verified against Windows with anything other than SHA-256,
+    // and a file digest that disagrees with the signer digest is rejected by
+    // verifiers. Keep the restriction until the other algorithms are tested
+    // end-to-end; lifting it is then a matter of forwarding `opts.hash_algo`.
     if !matches!(opts.hash_algo, HashAlgorithm::Sha256) {
         return Err(Error::Signing(
-            "only SHA-256 is supported for signing (CMS crate limitation)".into(),
+            "only SHA-256 is currently supported for signing".into(),
         ));
     }
 
-    // 1. Build SpcIndirectDataContent
-    let spc_content = build_spc_indirect_data(digest, opts)?;
+    let spc_content = spc_content.to_vec();
 
     // 2. Build the signer with SPC_INDIRECT_DATA as content type.
     //
@@ -114,7 +160,9 @@ pub fn create_authenticode_signature(
     let spc_content_value = der_sequence_content(&spc_content)?.to_vec();
     let mut signer = SignerBuilder::new(signing_key, signer_cert.clone())
         .content_type(spc_indirect_data_oid)
-        .message_id_content(spc_content_value);
+        // Deliberately digests something other than the stored content, so the
+        // CMS builder's usual equality check has to be opted out of.
+        .detached_message_digest(spc_content_value);
 
     // Authenticode requires these Microsoft-specific signed attributes. Their
     // values are ASN.1 structures directly inside the attribute SET, not OCTET
@@ -135,6 +183,15 @@ pub fn create_authenticode_signature(
         oid_to_bcder(&oid::SPC_STATEMENT_TYPE),
         vec![attribute_value_from_der(&statement_type)?],
     );
+
+    // Caller-supplied signed attributes. These are covered by the signature, so a
+    // verifier that strips or edits one invalidates the SignerInfo.
+    for (attr_oid, value) in &opts.extra_signed_attributes {
+        signer = signer.signed_attribute(
+            Oid(Bytes::copy_from_slice(attr_oid)),
+            vec![attribute_value_from_der(value)?],
+        );
+    }
 
     // 3. Build the SignedData
     let encap_content_type_oid = oid_to_bcder(&oid::SPC_INDIRECT_DATA);
@@ -225,6 +282,89 @@ pub fn build_spc_indirect_data(digest: &[u8], opts: &SigningOptions) -> Result<V
 
     spc.to_der()
         .map_err(|e| Error::Signing(format!("DER encode SpcIndirectDataContent: {e}")))
+}
+
+/// A decoded `SpcIndirectDataContent` supplied by a remote client.
+pub struct ParsedSpcIndirectData {
+    /// The `SpcIndirectDataContent` SEQUENCE, DER-encoded, ready to sign verbatim.
+    pub content_der: Vec<u8>,
+    /// The file digest the content commits to. For a PE this is the Authenticode digest.
+    pub digest: Vec<u8>,
+    /// OID of the algorithm that produced `digest`.
+    pub digest_algorithm: const_oid::ObjectIdentifier,
+}
+
+/// Parse a client-supplied "data to be signed" blob.
+///
+/// Accepts either a bare `SpcIndirectDataContent` SEQUENCE or a signer-less PKCS#7
+/// wrapping one — covering `build_extract_data_pkcs7` (which applies the RFC 5652
+/// OCTET STRING wrapper), `osslsigncode extract-data`, and a raw content value.
+pub fn parse_spc_indirect_data(blob: &[u8]) -> Result<ParsedSpcIndirectData> {
+    let content_der = extract_spc_content(blob)?;
+
+    let spc = SpcIndirectDataContent::from_der(&content_der).map_err(|e| {
+        Error::Signing(format!("not a valid SpcIndirectDataContent: {e}"))
+    })?;
+
+    Ok(ParsedSpcIndirectData {
+        digest: spc.message_digest.digest.as_bytes().to_vec(),
+        digest_algorithm: spc.message_digest.digest_algorithm.oid,
+        content_der,
+    })
+}
+
+/// Pull the `SpcIndirectDataContent` DER out of whichever envelope it arrived in.
+fn extract_spc_content(blob: &[u8]) -> Result<Vec<u8>> {
+    let bad = |m: &str| Error::Signing(format!("cannot read signing request: {m}"));
+
+    let (tag, cs, ce) = read_header(blob, 0)?;
+    if tag != 0x30 {
+        return Err(bad("expected a SEQUENCE"));
+    }
+
+    // Discriminate on the first child. A PKCS#7 ContentInfo leads with an OID
+    // (contentType); SpcIndirectDataContent leads with a SEQUENCE (the `data` field).
+    match children(blob, cs, ce)?.first().map(|c| c.0) {
+        Some(0x30) => Ok(blob.to_vec()),
+        Some(0x06) => spc_content_from_pkcs7(blob),
+        _ => Err(bad("neither SpcIndirectDataContent nor PKCS#7 ContentInfo")),
+    }
+}
+
+/// Walk a PKCS#7 SignedData down to its encapsulated content.
+///
+/// Read-only counterpart to the spine walk in `rewrite_authenticode_content`; kept
+/// separate so that byte-preserving splice code is never disturbed by parsing needs.
+fn spc_content_from_pkcs7(der: &[u8]) -> Result<Vec<u8>> {
+    let bad = |m: &str| Error::Signing(format!("cannot read PKCS#7 content: {m}"));
+    let seq = |b: &[u8], s: usize, e: usize, tag: u8, what: &'static str| {
+        children(b, s, e)?
+            .into_iter()
+            .find(|c| c.0 == tag)
+            .ok_or_else(|| bad(what))
+    };
+
+    // ContentInfo ::= SEQUENCE { contentType OID, content [0] EXPLICIT SignedData }
+    let (t0, cs0, ce0) = read_header(der, 0)?;
+    if t0 != 0x30 {
+        return Err(bad("ContentInfo is not a SEQUENCE"));
+    }
+    let l1 = seq(der, cs0, ce0, 0xA0, "missing [0] content")?;
+    let l2 = seq(der, l1.2, l1.3, 0x30, "missing SignedData SEQUENCE")?;
+    // encapContentInfo is the first inner SEQUENCE of SignedData (version is an
+    // INTEGER and digestAlgorithms a SET, so neither can be mistaken for it).
+    let l3 = seq(der, l2.2, l2.3, 0x30, "missing encapContentInfo")?;
+    let l4 = seq(der, l3.2, l3.3, 0xA0, "missing eContent [0]")?;
+    let l5 = *children(der, l4.2, l4.3)?
+        .first()
+        .ok_or_else(|| bad("empty eContent"))?;
+
+    Ok(match l5.0 {
+        // RFC 5652 form: the content sits inside an OCTET STRING wrapper.
+        0x04 => der[l5.2..l5.3].to_vec(),
+        // Native Authenticode form: the SEQUENCE sits directly under [0].
+        _ => der[l5.1..l5.3].to_vec(),
+    })
 }
 
 /// Build DER-encoded SpcSpOpusInfo.
@@ -481,6 +621,7 @@ mod tests {
             program_url: None,
             rfc3161_urls: Vec::new(),
             authenticode_urls: Vec::new(),
+            ..Default::default()
         };
         let cms = build_extract_data_pkcs7(&[0u8; 32], &opts).unwrap();
         let authenticode = normalize_authenticode_signature(&cms).unwrap();
@@ -488,4 +629,44 @@ mod tests {
         assert_ne!(authenticode, cms);
         assert_eq!(wrap_authenticode_content(&authenticode).unwrap(), cms);
     }
+
+    /// A signing service receives the client's blob in one of several envelopes and
+    /// must recover byte-identical content from each — otherwise the digest the
+    /// client committed to would change and `attach-signature` would reject it.
+    #[test]
+    fn parse_spc_indirect_data_accepts_every_envelope() {
+        let digest = [7u8; 32];
+        let opts = SigningOptions::default();
+
+        let bare = build_spc_indirect_data(&digest, &opts).unwrap();
+        let cms = build_extract_data_pkcs7(&digest, &opts).unwrap();
+        let authenticode = normalize_authenticode_signature(&cms).unwrap();
+
+        // The two envelopes really are distinct, or this test proves nothing.
+        assert_ne!(cms, authenticode);
+
+        for (label, blob) in [
+            ("bare SpcIndirectDataContent", &bare),
+            ("RFC 5652 OCTET STRING wrapper", &cms),
+            ("native Authenticode", &authenticode),
+        ] {
+            let parsed = parse_spc_indirect_data(blob)
+                .unwrap_or_else(|e| panic!("{label} should parse: {e}"));
+            assert_eq!(parsed.digest, digest, "{label}: wrong digest");
+            assert_eq!(parsed.content_der, bare, "{label}: content not byte-identical");
+            assert_eq!(
+                parsed.digest_algorithm,
+                const_oid::db::rfc5912::ID_SHA_256,
+                "{label}: wrong digest algorithm"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_spc_indirect_data_rejects_garbage() {
+        assert!(parse_spc_indirect_data(&[]).is_err());
+        assert!(parse_spc_indirect_data(&[0x30, 0x00]).is_err());
+        assert!(parse_spc_indirect_data(b"not der at all").is_err());
+    }
+
 }

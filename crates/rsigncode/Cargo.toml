@@ -6,17 +6,19 @@ description = "Microsoft Authenticode signing and verification"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-# CMS / PKCS#7 signing (apple-codesign's battle-tested crate)
-cryptographic-message-syntax = "0.26"
-# x509-certificate is a transitive dep of CMS crate; we use it directly for cert/key types
-x509-certificate = "0.23"
+# CMS / PKCS#7 signing. Our fork of indygreg/cryptography-rs: RustCrypto instead
+# of ring, der/spki 0.8, and a configurable signer digest algorithm.
+cryptographic-message-syntax = { git = "https://github.com/necessary-nu/cryptography-rs" }
+# x509-certificate is a transitive dep of the CMS crate; we use it directly for
+# cert/key types and the KeyInfoSigner trait, so it must come from the same source.
+x509-certificate = { git = "https://github.com/necessary-nu/cryptography-rs" }
 bcder = "0.7"
 bytes = "1"
 
 # ASN.1 and cryptographic formats (for custom Authenticode types)
-der = { version = "0.7", features = ["derive", "alloc", "oid"] }
-x509-cert = "0.2"
-const-oid = { version = "0.9", features = ["db"] }
+der = { version = "0.8", features = ["derive", "alloc", "oid"] }
+x509-cert = "0.3"
+const-oid = { version = "0.10", features = ["db"] }
 
 # Cryptographic primitives
 sha1 = "0.10"
@@ -27,8 +29,11 @@ digest = "0.10"
 thiserror = "2"
 pem = "3"
 base64 = "0.22"
-chrono = "0.4"
 hex = "0.4"
 reqwest = { version = "0.12", features = ["blocking"] }
+cryptoki = "0.12.0"
+signature = "3"
+zeroize = "1"
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 
 [dev-dependencies]

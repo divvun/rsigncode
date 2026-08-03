@@ -72,6 +72,42 @@ impl KeyMaterial {
     }
 }
 
+/// A certificate chain with no private key.
+///
+/// For signing backends that hold the key elsewhere — a PKCS#11 token, a remote
+/// KMS — where there is no key file to pair the certificates with.
+pub struct CertChain {
+    pub signer_cert: CapturedX509Certificate,
+    pub extra_certs: Vec<CapturedX509Certificate>,
+}
+
+impl CertChain {
+    /// Load a PEM bundle. The first certificate is taken as the signer; the rest
+    /// are treated as intermediates and included in the PKCS#7.
+    pub fn from_pem(path: &Path) -> Result<Self> {
+        let data = std::fs::read(path)?;
+        let certs = CapturedX509Certificate::from_pem_multiple(&data)
+            .map_err(|e| Error::Certificate(format!("failed to parse cert PEM: {e}")))?;
+
+        let mut certs = certs.into_iter();
+        let signer_cert = certs
+            .next()
+            .ok_or_else(|| Error::Certificate("no certificates in PEM file".into()))?;
+
+        Ok(Self {
+            signer_cert,
+            extra_certs: certs.collect(),
+        })
+    }
+
+    /// All certificates to include in the PKCS#7 (signer + intermediates).
+    pub fn all_certs(&self) -> Vec<CapturedX509Certificate> {
+        let mut certs = vec![self.signer_cert.clone()];
+        certs.extend(self.extra_certs.iter().cloned());
+        certs
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
