@@ -43,6 +43,10 @@ fn request_rfc3161(signature_bytes: &[u8], url: &str) -> Result<Rfc5652SignedDat
         .ok_or_else(|| Error::Timestamp("no signed data in timestamp response".into()))
 }
 
+/// Attempts per TSA URL. Public TSAs (Certum among them) drop the odd connection,
+/// and one reset must not fail a whole signing request.
+const TIMESTAMP_ATTEMPTS: u32 = 3;
+
 /// Send an RFC 3161 timestamp request, trying each URL in order until one succeeds.
 fn request_rfc3161_with_fallback(
     signature_bytes: &[u8],
@@ -50,11 +54,20 @@ fn request_rfc3161_with_fallback(
 ) -> Result<Rfc5652SignedData> {
     let mut last_err = None;
     for url in urls {
-        match request_rfc3161(signature_bytes, url) {
-            Ok(token) => return Ok(token),
-            Err(e) => {
-                eprintln!("Warning: timestamp request to {url} failed: {e}");
-                last_err = Some(e);
+        for attempt in 1..=TIMESTAMP_ATTEMPTS {
+            match request_rfc3161(signature_bytes, url) {
+                Ok(token) => return Ok(token),
+                Err(e) => {
+                    eprintln!(
+                        "Warning: timestamp request to {url} failed (attempt {attempt}/{TIMESTAMP_ATTEMPTS}): {e}"
+                    );
+                    last_err = Some(e);
+                    if attempt < TIMESTAMP_ATTEMPTS {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            500 * u64::from(attempt),
+                        ));
+                    }
+                }
             }
         }
     }
