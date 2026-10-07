@@ -302,9 +302,8 @@ pub struct ParsedSpcIndirectData {
 pub fn parse_spc_indirect_data(blob: &[u8]) -> Result<ParsedSpcIndirectData> {
     let content_der = extract_spc_content(blob)?;
 
-    let spc = SpcIndirectDataContent::from_der(&content_der).map_err(|e| {
-        Error::Signing(format!("not a valid SpcIndirectDataContent: {e}"))
-    })?;
+    let spc = SpcIndirectDataContent::from_der(&content_der)
+        .map_err(|e| Error::Signing(format!("not a valid SpcIndirectDataContent: {e}")))?;
 
     Ok(ParsedSpcIndirectData {
         digest: spc.message_digest.digest.as_bytes().to_vec(),
@@ -528,12 +527,36 @@ pub fn normalize_authenticode_signature(der: &[u8]) -> Result<Vec<u8>> {
     unwrap_authenticode_content(der)
 }
 
+/// Fail unless `der` is already in the form the Windows Authenticode SIP accepts:
+/// SignedData version 1 and native (not OCTET STRING-wrapped) content.
+///
+/// Generic CMS parsing tolerates both mistakes, so a signature can verify
+/// cryptographically here and still be rejected by Windows. Neither field is
+/// covered by the signature.
+pub fn check_authenticode_envelope(der: &[u8]) -> Result<()> {
+    if normalize_authenticode_signature(der)? == der {
+        Ok(())
+    } else {
+        Err(Error::Verification(
+            "signature is not in the form Windows accepts: SignedData must be version 1 \
+             with SpcIndirectDataContent not wrapped in an OCTET STRING"
+                .into(),
+        ))
+    }
+}
+
 /// Restore the RFC 5652 OCTET STRING wrapper so a generic CMS parser can read
 /// Authenticode content. This is an internal parsing normalization only; PE
 /// signatures retain the native Authenticode representation.
 pub(crate) fn wrap_authenticode_content(der: &[u8]) -> Result<Vec<u8>> {
     rewrite_authenticode_content(der, true)
 }
+
+/// `INTEGER 1`, the only SignedData version Windows accepts for Authenticode.
+const AUTHENTICODE_SIGNED_DATA_VERSION: [u8; 3] = [0x02, 0x01, 0x01];
+/// `INTEGER 3`, which RFC 5652 requires for content other than id-data, and which
+/// the CMS crate's parser insists on.
+const CMS_SIGNED_DATA_VERSION: [u8; 3] = [0x02, 0x01, 0x03];
 
 fn rewrite_authenticode_content(der: &[u8], wrap: bool) -> Result<Vec<u8>> {
     let bad = |m: &str| Error::Signing(format!("cannot fix up PKCS#7 content: {m}"));
@@ -556,6 +579,17 @@ fn rewrite_authenticode_content(der: &[u8], wrap: bool) -> Result<Vec<u8>> {
         .find(|c| c.0 == 0x30)
         .ok_or_else(|| bad("missing SignedData SEQUENCE"))?;
     let l2_children = children(der, l2.2, l2.3)?;
+    // version: the first child of SignedData.
+    let version = *l2_children
+        .first()
+        .filter(|c| c.0 == 0x02)
+        .ok_or_else(|| bad("missing SignedData version"))?;
+    let target_version = if wrap {
+        CMS_SIGNED_DATA_VERSION
+    } else {
+        AUTHENTICODE_SIGNED_DATA_VERSION
+    };
+    let version_matches = der[version.1..version.3] == target_version;
     // encapContentInfo: first inner SEQUENCE of SignedData.
     let l3 = *l2_children
         .iter()
@@ -571,10 +605,15 @@ fn rewrite_authenticode_content(der: &[u8], wrap: bool) -> Result<Vec<u8>> {
     // eContent's sole child is either the RFC 5652 OCTET STRING or the native
     // Authenticode content value.
     let l5 = l4_children.first().ok_or_else(|| bad("empty eContent"))?;
-    let new_l4_content = match (wrap, l5.0) {
-        (false, 0x04) => der[l5.2..l5.3].to_vec(),
-        (true, 0x04) | (false, _) => return Ok(der.to_vec()),
-        (true, _) => emit_tlv(0x04, &der[l5.1..l5.3]),
+    let wrapped = l5.0 == 0x04;
+    if wrap == wrapped && version_matches {
+        return Ok(der.to_vec());
+    }
+    let new_l4_content = match (wrap, wrapped) {
+        (true, false) => emit_tlv(0x04, &der[l5.1..l5.3]),
+        (false, true) => der[l5.2..l5.3].to_vec(),
+        // Content already in the wanted form; only the version changes.
+        (true, true) | (false, false) => der[l4.2..l4.3].to_vec(),
     };
 
     // Rebuild bottom-up, keeping every non-spine byte verbatim.
@@ -588,8 +627,14 @@ fn rewrite_authenticode_content(der: &[u8], wrap: bool) -> Result<Vec<u8>> {
     let new_l3 = emit_tlv(0x30, &l3_content);
 
     // SignedData = [ version ][ digestAlgos ][ new encap ][ certs ][ signerInfos ]
+    //
+    // RFC 5652 makes the version 3 whenever the content type is not id-data, and
+    // the CMS crate both writes and demands that. Windows rejects anything but 1
+    // (WinVerifyTrust HashMismatch / 0x8009200D), and 1 is what signtool writes.
+    // The version is not covered by the signature, so each direction rewrites it.
     let mut l2_content = Vec::new();
-    l2_content.extend_from_slice(&der[l2.2..l3.1]);
+    l2_content.extend_from_slice(&target_version);
+    l2_content.extend_from_slice(&der[version.3..l3.1]);
     l2_content.extend_from_slice(&new_l3);
     l2_content.extend_from_slice(&der[l3.3..l2.3]);
     let new_l2 = emit_tlv(0x30, &l2_content);
@@ -627,7 +672,69 @@ mod tests {
         let authenticode = normalize_authenticode_signature(&cms).unwrap();
 
         assert_ne!(authenticode, cms);
-        assert_eq!(wrap_authenticode_content(&authenticode).unwrap(), cms);
+        // Wrapping restores the generic CMS content form; the version stays at the
+        // Authenticode value, so normalizing again lands on the same bytes.
+        let rewrapped = wrap_authenticode_content(&authenticode).unwrap();
+        assert_ne!(rewrapped, authenticode);
+        assert_eq!(
+            normalize_authenticode_signature(&rewrapped).unwrap(),
+            authenticode
+        );
+    }
+
+    /// Offset of the SignedData version INTEGER's value byte.
+    fn signed_data_version_offset(der: &[u8]) -> usize {
+        let (_, cs0, ce0) = read_header(der, 0).unwrap();
+        let l1 = *children(der, cs0, ce0)
+            .unwrap()
+            .iter()
+            .find(|c| c.0 == 0xA0)
+            .unwrap();
+        let l2 = *children(der, l1.2, l1.3)
+            .unwrap()
+            .iter()
+            .find(|c| c.0 == 0x30)
+            .unwrap();
+        let version = children(der, l2.2, l2.3).unwrap()[0];
+        assert_eq!(&der[version.1..version.2], &[0x02, 0x01]);
+        version.2
+    }
+
+    #[test]
+    fn normalizing_sets_signed_data_version_1() {
+        let cms = build_extract_data_pkcs7(&[0u8; 32], &SigningOptions::default()).unwrap();
+        // The CMS builder picks version 3 for non-id-data content (RFC 5652).
+        assert_eq!(cms[signed_data_version_offset(&cms)], 3);
+
+        let authenticode = normalize_authenticode_signature(&cms).unwrap();
+        assert_eq!(authenticode[signed_data_version_offset(&authenticode)], 1);
+
+        // Native content but version 3: the shape ncodesignd shipped, which Windows
+        // rejects with HashMismatch.
+        let mut v3_native = authenticode.clone();
+        let offset = signed_data_version_offset(&v3_native);
+        v3_native[offset] = 3;
+        assert_eq!(
+            normalize_authenticode_signature(&v3_native).unwrap(),
+            authenticode
+        );
+    }
+
+    #[test]
+    fn envelope_check_rejects_what_windows_rejects() {
+        let cms = build_extract_data_pkcs7(&[0u8; 32], &SigningOptions::default()).unwrap();
+        let authenticode = normalize_authenticode_signature(&cms).unwrap();
+        check_authenticode_envelope(&authenticode).unwrap();
+
+        // Version 3, native content.
+        let mut v3_native = authenticode.clone();
+        let offset = signed_data_version_offset(&v3_native);
+        v3_native[offset] = 3;
+        assert!(check_authenticode_envelope(&v3_native).is_err());
+
+        // Version 1, OCTET STRING-wrapped content.
+        let wrapped = wrap_authenticode_content(&authenticode).unwrap();
+        assert!(check_authenticode_envelope(&wrapped).is_err());
     }
 
     /// A signing service receives the client's blob in one of several envelopes and
@@ -653,7 +760,10 @@ mod tests {
             let parsed = parse_spc_indirect_data(blob)
                 .unwrap_or_else(|e| panic!("{label} should parse: {e}"));
             assert_eq!(parsed.digest, digest, "{label}: wrong digest");
-            assert_eq!(parsed.content_der, bare, "{label}: content not byte-identical");
+            assert_eq!(
+                parsed.content_der, bare,
+                "{label}: content not byte-identical"
+            );
             assert_eq!(
                 parsed.digest_algorithm,
                 const_oid::db::rfc5912::ID_SHA_256,
@@ -668,5 +778,4 @@ mod tests {
         assert!(parse_spc_indirect_data(&[0x30, 0x00]).is_err());
         assert!(parse_spc_indirect_data(b"not der at all").is_err());
     }
-
 }

@@ -121,6 +121,10 @@ pub fn verify_pe_rich(input: &mut File, opts: &VerifyOptions) -> Result<VerifyRe
     let mut signatures = Vec::new();
 
     for (index, blob) in sig_blobs.iter().enumerate() {
+        // Parsing below goes through the generic CMS form, which hides envelope
+        // mistakes that make Windows reject an otherwise valid signature.
+        signing::check_authenticode_envelope(blob)?;
+
         let cms_blob = signing::wrap_authenticode_content(blob).map_err(|e| {
             Error::Verification(format!("failed to normalize Authenticode content: {e}"))
         })?;
